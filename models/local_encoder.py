@@ -68,20 +68,21 @@ class LocalEncoder(nn.Module):
                                     dropout=dropout)
 
     def forward(self, data: TemporalData) -> torch.Tensor:
+        breakpoint()
         for t in range(self.historical_steps):
-            data[f'edge_index_{t}'], _ = subgraph(subset=~data['padding_mask'][:, t], edge_index=data.edge_index)
+            data[f'edge_index_{t}'], _ = subgraph(subset=~data['padding_mask'][:, t], edge_index=data.edge_index) # 每一帧出现的智能体的子图 2*n
             data[f'edge_attr_{t}'] = \
-                data['positions'][data[f'edge_index_{t}'][0], t] - data['positions'][data[f'edge_index_{t}'][1], t]
+                data['positions'][data[f'edge_index_{t}'][0], t] - data['positions'][data[f'edge_index_{t}'][1], t] # 每条边的属性：上面筛选出的agent在t时刻的坐标位置差 -> 换成query embedding就是query1-query2
         if self.parallel:
             snapshots = [None] * self.historical_steps
             for t in range(self.historical_steps):
-                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}'])
+                edge_index, edge_attr = self.drop_edge(data[f'edge_index_{t}'], data[f'edge_attr_{t}']) # 位置距离 > 50m的边删除
                 snapshots[t] = Data(x=data.x[:, t], edge_index=edge_index, edge_attr=edge_attr,
                                     num_nodes=data.num_nodes)
             batch = Batch.from_data_list(snapshots)
             out = self.aa_encoder(x=batch.x, t=None, edge_index=batch.edge_index, edge_attr=batch.edge_attr,
                                   bos_mask=data['bos_mask'], rotate_mat=data['rotate_mat'])
-            out = out.view(self.historical_steps, out.shape[0] // self.historical_steps, -1)
+            out = out.view(self.historical_steps, out.shape[0] // self.historical_steps, -1) # torch.Size([20, 721, 128])
         else:
             out = [None] * self.historical_steps
             for t in range(self.historical_steps):
@@ -89,9 +90,9 @@ class LocalEncoder(nn.Module):
                 out[t] = self.aa_encoder(x=data.x[:, t], t=t, edge_index=edge_index, edge_attr=edge_attr,
                                          bos_mask=data['bos_mask'][:, t], rotate_mat=data['rotate_mat'])
             out = torch.stack(out)  # [T, N, D]
-        out = self.temporal_encoder(x=out, padding_mask=data['padding_mask'][:, : self.historical_steps])
+        out = self.temporal_encoder(x=out, padding_mask=data['padding_mask'][:, : self.historical_steps]) # torch.Size([721, 128])
         edge_index, edge_attr = self.drop_edge(data['lane_actor_index'], data['lane_actor_vectors'])
-        out = self.al_encoder(x=(data['lane_vectors'], out), edge_index=edge_index, edge_attr=edge_attr,
+        out = self.al_encoder(x=(data['lane_vectors'], out), edge_index=edge_index, edge_attr=edge_attr, # torch.Size([721, 128])
                               is_intersections=data['is_intersections'], turn_directions=data['turn_directions'],
                               traffic_controls=data['traffic_controls'], rotate_mat=data['rotate_mat'])
         return out
@@ -145,16 +146,17 @@ class AAEncoder(MessagePassing):
                 bos_mask: torch.Tensor,
                 rotate_mat: Optional[torch.Tensor] = None,
                 size: Size = None) -> torch.Tensor:
+        breakpoint()
         if self.parallel:
             if rotate_mat is None:
-                center_embed = self.center_embed(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1))
+                center_embed = self.center_embed(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1)) # 20 * n * 2
             else:
                 center_embed = self.center_embed(
-                    torch.matmul(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1).unsqueeze(-2),
+                    torch.matmul(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1).unsqueeze(-2), # torch.Size([20, 721, 128]) 节点的特征维度从2扩展到128->query embedding可以不要这一部分 输入的特征就是128维的
                                  rotate_mat.expand(self.historical_steps, *rotate_mat.shape)).squeeze(-2))
-            center_embed = torch.where(bos_mask.t().unsqueeze(-1),
-                                       self.bos_token.unsqueeze(-2),
-                                       center_embed).view(x.shape[0], -1)
+            center_embed = torch.where(bos_mask.t().unsqueeze(-1), # 20 * n * 1
+                                       self.bos_token.unsqueeze(-2), # torch.Size([20, 1, 128]) 
+                                       center_embed).view(x.shape[0], -1) # torch.Size([14420, 128]) 对于每一个agent其历史中出现的那一阵的embedding表述为可学习的nn.parameter
         else:
             if rotate_mat is None:
                 center_embed = self.center_embed(x)
@@ -162,8 +164,8 @@ class AAEncoder(MessagePassing):
                 center_embed = self.center_embed(torch.bmm(x.unsqueeze(-2), rotate_mat).squeeze(-2))
             center_embed = torch.where(bos_mask.unsqueeze(-1), self.bos_token[t], center_embed)
         center_embed = center_embed + self._mha_block(self.norm1(center_embed), x, edge_index, edge_attr, rotate_mat,
-                                                      size)
-        center_embed = center_embed + self._ff_block(self.norm2(center_embed))
+                                                      size) # torch.Size([14420, 128])
+        center_embed = center_embed + self._ff_block(self.norm2(center_embed)) # torch.Size([14420, 128])
         return center_embed
 
     def message(self,
@@ -179,19 +181,19 @@ class AAEncoder(MessagePassing):
             nbr_embed = self.nbr_embed([x_j, edge_attr])
         else:
             if self.parallel:
-                center_rotate_mat = rotate_mat.repeat(self.historical_steps, 1, 1)[edge_index[1]]
+                center_rotate_mat = rotate_mat.repeat(self.historical_steps, 1, 1)[edge_index[1]] # 这里的edge_index是历史20帧的边 所以这里要将n个agent坐标原点的院选矩阵复制20次
             else:
                 center_rotate_mat = rotate_mat[edge_index[1]]
-            nbr_embed = self.nbr_embed([torch.bmm(x_j.unsqueeze(-2), center_rotate_mat).squeeze(-2),
-                                        torch.bmm(edge_attr.unsqueeze(-2), center_rotate_mat).squeeze(-2)])
-        query = self.lin_q(center_embed_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        key = self.lin_k(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        value = self.lin_v(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
+            nbr_embed = self.nbr_embed([torch.bmm(x_j.unsqueeze(-2), center_rotate_mat).squeeze(-2), # n(20帧) * 2
+                                        torch.bmm(edge_attr.unsqueeze(-2), center_rotate_mat).squeeze(-2)]) # n(20帧) * 2 output: n * 128
+        query = self.lin_q(center_embed_i).view(-1, self.num_heads, self.embed_dim // self.num_heads) # torch.Size([99130, 8, 16])
+        key = self.lin_k(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads) # torch.Size([99130, 8, 16])
+        value = self.lin_v(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads) # torch.Size([99130, 8, 16])
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * key).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
         alpha = self.attn_drop(alpha)
-        return value * alpha.unsqueeze(-1)
+        return value * alpha.unsqueeze(-1) # torch.Size([99130, 8, 16])
 
     def update(self,
                inputs: torch.Tensor,
@@ -238,14 +240,15 @@ class TemporalEncoder(nn.Module):
         self.apply(init_weights)
 
     def forward(self,
-                x: torch.Tensor,
-                padding_mask: torch.Tensor) -> torch.Tensor:
-        x = torch.where(padding_mask.t().unsqueeze(-1), self.padding_token, x)
-        expand_cls_token = self.cls_token.expand(-1, x.shape[1], -1)
-        x = torch.cat((x, expand_cls_token), dim=0)
-        x = x + self.pos_embed
+                x: torch.Tensor, # torch.Size([20, 721, 128])
+                padding_mask: torch.Tensor) -> torch.Tensor: # torch.Size([20, 721, 1])
+        breakpoint()
+        x = torch.where(padding_mask.t().unsqueeze(-1), self.padding_token, x) # torch.Size([20, 721, 128])
+        expand_cls_token = self.cls_token.expand(-1, x.shape[1], -1) # torch.Size([1, 721, 128])
+        x = torch.cat((x, expand_cls_token), dim=0) # torch.Size([21, 721, 128])
+        x = x + self.pos_embed # torch.Size([21, 721, 128])
         out = self.transformer_encoder(src=x, mask=self.attn_mask, src_key_padding_mask=None)
-        return out[-1]  # [N, D]
+        return out[-1]  # [N, D] torch.Size([21, 721, 128])
 
     @staticmethod
     def generate_square_subsequent_mask(seq_len: int) -> torch.Tensor:

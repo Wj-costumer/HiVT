@@ -58,8 +58,9 @@ class GlobalInteractor(nn.Module):
     def forward(self,
                 data: TemporalData,
                 local_embed: torch.Tensor) -> torch.Tensor:
-        edge_index, _ = subgraph(subset=~data['padding_mask'][:, self.historical_steps - 1], edge_index=data.edge_index)
-        rel_pos = data['positions'][edge_index[0], self.historical_steps - 1] - data['positions'][
+        breakpoint()
+        edge_index, _ = subgraph(subset=~data['padding_mask'][:, self.historical_steps - 1], edge_index=data.edge_index) # n * 2
+        rel_pos = data['positions'][edge_index[0], self.historical_steps - 1] - data['positions'][ # n * 2
             edge_index[1], self.historical_steps - 1]
         if data['rotate_mat'] is None:
             rel_embed = self.rel_embed(rel_pos)
@@ -68,13 +69,13 @@ class GlobalInteractor(nn.Module):
             rel_theta = data['rotate_angles'][edge_index[0]] - data['rotate_angles'][edge_index[1]]
             rel_theta_cos = torch.cos(rel_theta).unsqueeze(-1)
             rel_theta_sin = torch.sin(rel_theta).unsqueeze(-1)
-            rel_embed = self.rel_embed([rel_pos, torch.cat((rel_theta_cos, rel_theta_sin), dim=-1)])
+            rel_embed = self.rel_embed([rel_pos, torch.cat((rel_theta_cos, rel_theta_sin), dim=-1)]) # 2 -> 128
         x = local_embed
-        for layer in self.global_interactor_layers:
+        for layer in self.global_interactor_layers: # default = 3层
             x = layer(x, edge_index, rel_embed)
         x = self.norm(x)  # [N, D]
-        x = self.multihead_proj(x).view(-1, self.num_modes, self.embed_dim)  # [N, F, D]
-        x = x.transpose(0, 1)  # [F, N, D]
+        x = self.multihead_proj(x).view(-1, self.num_modes, self.embed_dim)  # [N, F, D] torch.Size([721, 6, 128])
+        x = x.transpose(0, 1)  # [F, N, D] torch.Size([6, 721, 128])
         return x
 
 
@@ -110,11 +111,11 @@ class GlobalInteractorLayer(MessagePassing):
             nn.Dropout(dropout))
 
     def forward(self,
-                x: torch.Tensor,
-                edge_index: Adj,
-                edge_attr: torch.Tensor,
+                x: torch.Tensor, # local_embed torch.Size([721, 128])
+                edge_index: Adj, # torch.Size([2, 9438])
+                edge_attr: torch.Tensor, # torch.Size([9438, 128])
                 size: Size = None) -> torch.Tensor:
-        x = x + self._mha_block(self.norm1(x), edge_index, edge_attr, size)
+        x = x + self._mha_block(self.norm1(x), edge_index, edge_attr, size) # torch.Size([721, 128])
         x = x + self._ff_block(self.norm2(x))
         return x
 

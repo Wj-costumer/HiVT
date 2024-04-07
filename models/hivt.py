@@ -90,14 +90,14 @@ class HiVT(pl.LightningModule):
     def forward(self, data: TemporalData):
         if self.rotate:
             rotate_mat = torch.empty(data.num_nodes, 2, 2, device=self.device)
-            sin_vals = torch.sin(data['rotate_angles'])
+            sin_vals = torch.sin(data['rotate_angles']) # 每一个agent历史轨迹终点向量的方向
             cos_vals = torch.cos(data['rotate_angles'])
-            rotate_mat[:, 0, 0] = cos_vals
+            rotate_mat[:, 0, 0] = cos_vals # n * 2 * 2
             rotate_mat[:, 0, 1] = -sin_vals
             rotate_mat[:, 1, 0] = sin_vals
             rotate_mat[:, 1, 1] = cos_vals
-            if data.y is not None:
-                data.y = torch.bmm(data.y, rotate_mat)
+            if data.y is not None: # data.y shape n * 30 * 2
+                data.y = torch.bmm(data.y, rotate_mat) # bmm将两个torch的每个元素相乘 所以这里就是将每个agent的未来真值轨迹转换到以历史中
             data['rotate_mat'] = rotate_mat
         else:
             data['rotate_mat'] = None
@@ -123,9 +123,9 @@ class HiVT(pl.LightningModule):
         return loss
 
     def validation_step(self, data, batch_idx):
-        y_hat, pi = self(data)
-        reg_mask = ~data['padding_mask'][:, self.historical_steps:]
-        l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N]
+        y_hat, pi = self(data) # torch.Size([6, 721, 30, 4]) torch.Size([721, 6])
+        reg_mask = ~data['padding_mask'][:, self.historical_steps:] # torch.Size([721, 30])
+        l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N] torch.Size([6, 721])
         best_mode = l2_norm.argmin(dim=0)
         y_hat_best = y_hat[best_mode, torch.arange(data.num_nodes)]
         reg_loss = self.reg_loss(y_hat_best[reg_mask], data.y[reg_mask])
